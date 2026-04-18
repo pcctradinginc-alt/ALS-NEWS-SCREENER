@@ -28,7 +28,7 @@ GMAIL_PASS = os.environ.get('GMAIL_PASS')
 RECIPIENT = os.environ.get('RECIPIENT')
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY')
 
-# Optimierte Suchanfragen für maximale Relevanz
+# Optimierte Suchanfragen
 SEARCH_QUERIES = [
     'site:fda.gov ALS OR "Amyotrophic Lateral Sclerosis"',
     'site:ema.europa.eu ALS OR "Amyotrophic Lateral Sclerosis"',
@@ -39,31 +39,31 @@ SEARCH_QUERIES = [
     'ALS "ALSFRS-R" "significant slowing"'
 ]
 
-# --- KI ZUSAMMENFASSUNG (CLAUDE HAIKU) ---
+# --- KI ZUSAMMENFASSUNG (CLAUDE 3.5 HAIKU) ---
 def get_ai_summary(title, snippet):
     if not ANTHROPIC_KEY:
         return "Zusammenfassung nicht verfügbar (API-Key fehlt)."
     
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-        # Der Prompt ist auf Deutsch und präzise formuliert
+        # Prompt für präzise deutsche Zusammenfassungen
         prompt = f"""Fasse diese ALS-Forschungsnachricht in 2 bis maximal 3 prägnanten deutschen Sätzen zusammen. 
         Konzentriere dich auf die medizinische Bedeutung für Patienten (z.B. Verlangsamung der Progression, Zulassungsstatus). 
-        Antworte nur mit der Zusammenfassung.
+        Antworte nur mit der Zusammenfassung, ohne Einleitung.
         
         Titel: {title}
         Inhalt: {snippet}"""
         
         message = client.messages.create(
-            model="claude-3-haiku-20240307",
-            max_tokens=200,
+            model="claude-3-5-haiku-latest", 
+            max_tokens=300,
             temperature=0,
             messages=[{"role": "user", "content": prompt}]
         )
         return message.content[0].text.strip()
     except Exception as e:
-        logging.error(f"KI-Fehler: {e}")
-        return "Zusammenfassung konnte aufgrund eines technischen Fehlers nicht erstellt werden."
+        logging.error(f"KI-Fehler Detail: {str(e)}")
+        return "Zusammenfassung konnte aktuell nicht erstellt werden (API-Fehler)."
 
 # --- SCORING LOGIK ---
 def calculate_score(entry):
@@ -89,7 +89,6 @@ def calculate_score(entry):
     # Hype-Filter
     if any(x in text for x in ["mouse", "mice", "animal model", "preclinical"]): score -= 40
     if any(x in text for x in ["icebucket", "walk", "fundraiser", "donation"]): score -= 60
-    if "stem cell" in text or "stammzell" in text: score -= 30
     
     return int(score)
 
@@ -114,7 +113,7 @@ def get_news():
             link = getattr(entry, 'link', '')
             if link and link not in seen_urls:
                 score = calculate_score(entry)
-                # Wir erhöhen die Hürde für die KI-Zusammenfassung auf Score 40
+                # Nur Artikel ab einem Score von 40 werden zusammengefasst
                 if score >= 40: 
                     snippet = getattr(entry, 'summary', '')
                     logging.info(f"KI-Analyse für: {entry.title[:50]}...")
@@ -129,14 +128,15 @@ def get_news():
                     })
                     seen_urls.append(link)
     
+    # Sortierung
     all_news = sorted(all_news, key=lambda x: x['score'], reverse=True)
     db_file.write_text(json.dumps({"hashes": seen_urls[-300:]}))
-    return all_news[:15] # Die besten 15 Ergebnisse
+    return all_news[:15]
 
 # --- EMAIL VERSAND (Apple Mail Style) ---
 def send_email(news_items):
     if not news_items:
-        logging.info("Keine hochrelevanten neuen Artikel gefunden.")
+        logging.info("Keine relevanten neuen Artikel gefunden.")
         return
 
     msg = MIMEMultipart('alternative')
@@ -149,7 +149,7 @@ def send_email(news_items):
     <body style="font-family: -apple-system, system-ui, sans-serif; background-color: #f5f5f7; margin: 0; padding: 20px;">
         <div style="max-width: 600px; margin: auto; background: white; padding: 40px; border-radius: 24px; box-shadow: 0 10px 40px rgba(0,0,0,0.06);">
             <header style="border-bottom: 0.5px solid #d2d2d7; padding-bottom: 25px; margin-bottom: 35px;">
-                <p style="color: #0071e3; font-weight: 600; font-size: 13px; text-transform: uppercase; margin: 0; letter-spacing: 0.8px;">AI-Powered Research Update</p>
+                <p style="color: #0071e3; font-weight: 600; font-size: 13px; text-transform: uppercase; margin: 0; letter-spacing: 0.8px;">AI-Summarized Digest</p>
                 <h1 style="font-size: 28px; font-weight: 700; color: #1d1d1f; margin: 6px 0 0 0; letter-spacing: -0.5px;">ALS Intelligence</h1>
             </header>
     """
@@ -174,8 +174,8 @@ def send_email(news_items):
     html += """
             <footer style="margin-top: 50px; padding-top: 25px; border-top: 0.5px solid #d2d2d7; text-align: center;">
                 <p style="font-size: 12px; color: #86868b; line-height: 1.6;">
-                    Diese Zusammenfassung wurde von Claude 3 Haiku erstellt. <br>
-                    Automatisierter Filter für ALS-Forschung.
+                    Zusammenfassungen generiert durch Claude 3.5 Haiku. <br>
+                    Automatisierter Filter für ALS-Forschungsergebnisse.
                 </p>
             </footer>
         </div>
@@ -189,7 +189,7 @@ def send_email(news_items):
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(GMAIL_USER, GMAIL_PASS)
             server.sendmail(GMAIL_USER, msg['To'], msg.as_string())
-        logging.info("Erfolgreich versendet.")
+        logging.info("Report erfolgreich versendet.")
     except Exception as e:
         logging.error(f"Fehler: {e}")
 
