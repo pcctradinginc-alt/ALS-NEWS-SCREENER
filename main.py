@@ -23,7 +23,7 @@ ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY')
 if not ANTHROPIC_KEY:
     raise ValueError("❌ ANTHROPIC_API_KEY fehlt!")
 
-# --- MODELL-IDs (Stand April 2026) ---
+# --- MODELL-IDs ---
 PRIMARY_MODEL = "claude-haiku-4-5-20251001"
 BACKUP_MODEL  = "claude-sonnet-4-6"
 
@@ -35,7 +35,7 @@ def calculate_score(title: str, link: str) -> int:
     domain = urllib.parse.urlparse(link).netloc.lower()
     score = 0
 
-    # Positive Punkte
+    # === SEHR BREITE POSITIVE PUNKTE ===
     if any(k in text for k in ["approval", "approved", "zulassung", "fda approval", "ema"]):
         score += 100
     if any(k in text for k in ["phase 3", "phase iii", "pivotal"]):
@@ -47,13 +47,25 @@ def calculate_score(title: str, link: str) -> int:
     if any(k in text for k in ["gene therapy", "aso", "antisense", "stem cell", "cell therapy"]):
         score += 20
 
+    # === TECHNOLOGIE & BREAKTHROUGHS (wird jetzt stark gewichtet) ===
+    if any(k in text for k in ["neuralink", "brain-computer", "bci", "brain chip", "thought control", 
+                               "thought-to", "waves of will", "synchron", "brain interface", "brain chip"]):
+        score += 40
+    if any(k in text for k in ["breakthrough", "milestone", "game changer", "revolutionary", "transform", 
+                               "life-changing", "first time", "new hope"]):
+        score += 25
+
+    # Pipeline & allgemeine Studien
+    if "pipeline" in text or ("clinical trial" in text and "als" in text):
+        score += 18
+
     # Quellen-Bonus
     premium = ["fda.gov", "nature.com", "nejm.org", "thelancet.com", "reuters.com", "statnews.com",
                "neurologylive.com", "cgtlive.com", "alzforum.org", "beingpatient.com"]
     if any(s in domain for s in premium):
         score += 25
 
-    # Abzüge
+    # === ABZÜGE ===
     if any(k in text for k in ["mouse", "murine", "preclinical", "animal model"]):
         score -= 40
     if any(k in text for k in ["ice bucket", "charity", "fundraiser", "spendenlauf", "donation run"]):
@@ -96,29 +108,16 @@ def get_news():
         except:
             seen_urls = []
 
-    # === DEINE ERWEITERTE QUERY-LISTE (optimiert) ===
+    # Deine erweiterte Query-Liste
     queries = [
-        # 1. Zulassungen & Behörden
         'ALS (FDA OR EMA OR "regulatory approval" OR "marketing authorization" OR "Breakthrough Designation" OR "Priority Review" OR "Fast Track")',
-        
-        # 2. Bekannte Pipeline 2026
         'ALS (NurOwn OR Pridopidine OR Tofersen OR Qalsody OR AMX0035 OR Relyvrio OR CNM-Au8 OR MN-166 OR ibudilast OR RT1999 OR smilagenin OR VHB937 OR QRL-201 OR ulefnersen)',
         'ALS ("Phoenix Trial" OR "HEALEY ALS Platform" OR "PREVAiLS" OR "EXPERTS-ALS" OR "ASTRALS")',
-        
-        # 3. Neue / unbekannte Wirkstoffe
         'ALS ("novel therapeutic" OR "first-in-class" OR "investigational drug" OR "new treatment" OR "emerging therapy" OR "lead candidate")',
         'ALS ("Phase 1" OR "Phase I" OR "Phase 2" OR "Phase II" OR "topline results" OR "interim data" OR "data readout")',
-        
-        # 4. Genetik & molekulare Targets
         'ALS (TDP-43 OR Stathmin-2 OR UNC13A OR FUS OR SOD1 OR C9orf72 OR "gene therapy" OR ASO OR "antisense" OR CRISPR)',
-        
-        # 5. Biomarker
         'ALS (biomarker OR NfL OR "Neurofilament" OR "ALSFRS-R" OR pNfH)',
-        
-        # 6. Technologie
-        'ALS ("Brain-Computer Interface" OR BCI OR Synchron OR Neuralink OR "eye-tracking")',
-        
-        # 7. Breite Fallback-Suche
+        'ALS ("Brain-Computer Interface" OR BCI OR Synchron OR Neuralink OR "eye-tracking" OR "brain chip")',
         'ALS ("motor neuron disease" OR "clinical trial" OR "study results" OR "breakthrough")'
     ]
    
@@ -155,10 +154,11 @@ def get_news():
                     'score': score
                 })
             else:
-                logging.info(f"   → Score zu niedrig ({score}): {entry.title[:60]}...")
+                logging.info(f"   → Score zu niedrig ({score}): {entry.title[:70]}...")
 
             seen_urls.append(link)
 
+    # Sortierung nach Score (höchste zuerst)
     found_items.sort(key=lambda x: x['score'], reverse=True)
     found_items = found_items[:8]
 
@@ -203,6 +203,12 @@ def send_email(items):
                         <h2 style="margin:0 0 14px; font-size:19px; line-height:1.3; font-weight:600;">{item['title']}</h2>
                     </a>
                     <p style="margin:0; line-height:1.65; font-size:15.5px; color:#333;">{item['ai_summary']}</p>
+                    
+                    <!-- Score-Anzeige -->
+                    <div style="margin-top: 18px; padding-top: 12px; border-top: 1px solid #ddd; font-size:13px; color:#0071e3; font-weight:600;">
+                        Relevanz: <strong>{item['score']} Punkte</strong>
+                    </div>
+                    
                     <div style="margin-top:20px;">
                         <a href="{item['link']}" target="_blank" style="color:#0071e3; font-weight:500; font-size:14px; text-decoration:none;">Mehr lesen →</a>
                     </div>
