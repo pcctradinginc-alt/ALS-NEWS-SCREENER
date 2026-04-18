@@ -23,7 +23,7 @@ ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY')
 if not ANTHROPIC_KEY:
     raise ValueError("❌ ANTHROPIC_API_KEY fehlt!")
 
-# --- MODELL-IDs ---
+# --- MODELL-IDs (Stand April 2026) ---
 PRIMARY_MODEL = "claude-haiku-4-5-20251001"
 BACKUP_MODEL  = "claude-sonnet-4-6"
 
@@ -35,7 +35,7 @@ def calculate_score(title: str, link: str) -> int:
     domain = urllib.parse.urlparse(link).netloc.lower()
     score = 0
 
-    # Positive Punkte (sehr breit)
+    # Positive Punkte
     if any(k in text for k in ["approval", "approved", "zulassung", "fda approval", "ema"]):
         score += 100
     if any(k in text for k in ["phase 3", "phase iii", "pivotal"]):
@@ -44,11 +44,12 @@ def calculate_score(title: str, link: str) -> int:
         score += 35
     if any(k in text for k in ["alsfrs", "nfl", "neurofilament", "biomarker", "survival", "endpoint"]):
         score += 25
-    if any(k in text for k in ["gene therapy", "aso", "antisense", "stem cell", "cell therapy", "pridopidine"]):
+    if any(k in text for k in ["gene therapy", "aso", "antisense", "stem cell", "cell therapy"]):
         score += 20
 
     # Quellen-Bonus
-    premium = ["fda.gov", "nature.com", "nejm.org", "thelancet.com", "reuters.com", "statnews.com", "neurologylive.com", "cgtlive.com", "alzforum.org", "foxnews.com", "beingpatient.com"]
+    premium = ["fda.gov", "nature.com", "nejm.org", "thelancet.com", "reuters.com", "statnews.com",
+               "neurologylive.com", "cgtlive.com", "alzforum.org", "beingpatient.com"]
     if any(s in domain for s in premium):
         score += 25
 
@@ -95,12 +96,30 @@ def get_news():
         except:
             seen_urls = []
 
-    # === BREITERE SUCHANFRAGEN (das war das Hauptproblem) ===
+    # === DEINE ERWEITERTE QUERY-LISTE (optimiert) ===
     queries = [
-        'ALS (Phase 3 OR Phase III OR pivotal OR "Phase 2" OR "gene therapy" OR ASO OR pridopidine OR NurOwn)',
-        'ALS (FDA OR approval OR clinical trial)',
-        'ALS biomarker OR ALSFRS-R OR NfL',
-        'ALS "Phase 3" OR "Phase 2" OR pivotal'
+        # 1. Zulassungen & Behörden
+        'ALS (FDA OR EMA OR "regulatory approval" OR "marketing authorization" OR "Breakthrough Designation" OR "Priority Review" OR "Fast Track")',
+        
+        # 2. Bekannte Pipeline 2026
+        'ALS (NurOwn OR Pridopidine OR Tofersen OR Qalsody OR AMX0035 OR Relyvrio OR CNM-Au8 OR MN-166 OR ibudilast OR RT1999 OR smilagenin OR VHB937 OR QRL-201 OR ulefnersen)',
+        'ALS ("Phoenix Trial" OR "HEALEY ALS Platform" OR "PREVAiLS" OR "EXPERTS-ALS" OR "ASTRALS")',
+        
+        # 3. Neue / unbekannte Wirkstoffe
+        'ALS ("novel therapeutic" OR "first-in-class" OR "investigational drug" OR "new treatment" OR "emerging therapy" OR "lead candidate")',
+        'ALS ("Phase 1" OR "Phase I" OR "Phase 2" OR "Phase II" OR "topline results" OR "interim data" OR "data readout")',
+        
+        # 4. Genetik & molekulare Targets
+        'ALS (TDP-43 OR Stathmin-2 OR UNC13A OR FUS OR SOD1 OR C9orf72 OR "gene therapy" OR ASO OR "antisense" OR CRISPR)',
+        
+        # 5. Biomarker
+        'ALS (biomarker OR NfL OR "Neurofilament" OR "ALSFRS-R" OR pNfH)',
+        
+        # 6. Technologie
+        'ALS ("Brain-Computer Interface" OR BCI OR Synchron OR Neuralink OR "eye-tracking")',
+        
+        # 7. Breite Fallback-Suche
+        'ALS ("motor neuron disease" OR "clinical trial" OR "study results" OR "breakthrough")'
     ]
    
     found_items = []
@@ -126,7 +145,7 @@ def get_news():
                     pass
 
             score = calculate_score(entry.title, link)
-            if score >= 12:                    # jetzt sehr locker
+            if score >= 12:
                 logging.info(f"✅ News akzeptiert ({score} Pkt.): {entry.title[:80]}...")
                 summary = call_ai_model(entry.title, getattr(entry, 'summary', ''))
                 found_items.append({
@@ -136,7 +155,7 @@ def get_news():
                     'score': score
                 })
             else:
-                logging.info(f"   → Score zu niedrig ({score} Pkt.): {entry.title[:60]}...")
+                logging.info(f"   → Score zu niedrig ({score}): {entry.title[:60]}...")
 
             seen_urls.append(link)
 
@@ -148,7 +167,6 @@ def get_news():
 
 
 def send_email(items):
-    # ... (unverändert – schöne Status-Mail bei 0 News)
     msg = MIMEMultipart('alternative')
     msg['From'] = GMAIL_USER
     msg['To'] = RECIPIENT or GMAIL_USER
@@ -161,8 +179,6 @@ def send_email(items):
     else:
         msg['Subject'] = f"🧬 ALS Research Update – Keine neuen News ({today})"
         has_news = False
-
-    # HTML bleibt gleich wie in der letzten Version (mit schöner "Keine News"-Karte)
 
     html = f"""
     <!DOCTYPE html>
