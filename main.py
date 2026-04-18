@@ -36,7 +36,7 @@ def calculate_score(title: str, link: str) -> int:
     domain = urllib.parse.urlparse(link).netloc.lower()
     score = 0
 
-    # === POSITIVE PUNKTE ===
+    # Positive Punkte
     if any(k in text for k in ["approval", "approved", "zulassung", "fda approval", "ema"]):
         score += 100
     if any(k in text for k in ["phase 3", "phase iii", "pivotal"]):
@@ -49,14 +49,13 @@ def calculate_score(title: str, link: str) -> int:
         score += 20
 
     # Quellen-Bonus
-    premium = ["fda.gov", "nature.com", "nejm.org", "thelancet.com", "reuters.com",
-               "statnews.com", "neurologylive.com", "cgtlive.com", "alzforum.org"]
+    premium = ["fda.gov", "nature.com", "nejm.org", "thelancet.com", "reuters.com", "statnews.com", "neurologylive.com", "cgtlive.com", "alzforum.org"]
     if any(s in domain for s in premium):
         score += 25
     elif any(s in domain for s in ["medcitynews", "alsnews", "neurology.org"]):
         score += 15
 
-    # === ABZÜGE ===
+    # Abzüge
     if any(k in text for k in ["mouse", "murine", "preclinical", "animal model"]):
         score -= 40
     if any(k in text for k in ["ice bucket", "charity", "fundraiser", "spendenlauf", "donation run"]):
@@ -69,7 +68,6 @@ def calculate_score(title: str, link: str) -> int:
 
 def call_ai_model(title, snippet):
     prompt = f"Fasse diese ALS-Forschung kurz in 2 Sätzen zusammen (Patientenfokus):\n{title}\n{snippet}"
-   
     for model_id in [PRIMARY_MODEL, BACKUP_MODEL]:
         try:
             logging.info(f"→ KI-Analyse mit {model_id}...")
@@ -85,11 +83,11 @@ def call_ai_model(title, snippet):
         except Exception as e:
             logging.warning(f"⚠️ Fehler bei {model_id}: {e}")
             continue
-           
     return "Zusammenfassung aktuell nicht verfügbar."
 
 
 def get_news():
+    # ... (unverändert – Scoring, 7-Tage-Filter, max 8 Artikel)
     db_file = Path('sent_articles.json')
     seen_urls = []
    
@@ -118,19 +116,18 @@ def get_news():
             if not link or link in seen_urls:
                 continue
 
-            # === ZEITFILTER: nur letzte 72 Stunden ===
+            # Zeitfilter: letzte 7 Tage (168 Stunden)
             published = getattr(entry, 'published_parsed', None)
             if published:
                 try:
                     pub_dt = datetime.datetime.fromtimestamp(time.mktime(published))
-                    if (now - pub_dt).total_seconds() > 72 * 3600:   # 72 Stunden
+                    if (now - pub_dt).total_seconds() > 168 * 3600:
                         continue
                 except:
-                    pass  # falls Datum fehlt → trotzdem prüfen
+                    pass
 
-            # === SCORING (Vorschlag 2) ===
             score = calculate_score(entry.title, link)
-            if score >= 30:
+            if score >= 20:                     # <-- hier kannst du später noch feinjustieren
                 logging.info(f"High-Score News gefunden ({score} Pkt.): {entry.title[:70]}...")
                 summary = call_ai_model(entry.title, getattr(entry, 'summary', ''))
                 found_items.append({
@@ -140,30 +137,30 @@ def get_news():
                     'score': score
                 })
 
-            # Duplikat-Check: immer merken (auch wenn Score zu niedrig)
             seen_urls.append(link)
 
-    # === TAGESLIMIT + SORTIERUNG: beste zuerst ===
     found_items.sort(key=lambda x: x['score'], reverse=True)
-    found_items = found_items[:8]   # max. 8 Artikel
+    found_items = found_items[:8]
 
-    # Datenbank aktualisieren
     db_file.write_text(json.dumps({"hashes": seen_urls[-500:]}))
-
     return found_items
 
 
 def send_email(items):
-    if not items:
-        logging.info("Keine neuen relevanten News gefunden.")
-        return
-       
     msg = MIMEMultipart('alternative')
-    msg['Subject'] = f"🧬 ALS Research Update – {datetime.date.today().strftime('%d.%m.%Y')}"
     msg['From'] = GMAIL_USER
     msg['To'] = RECIPIENT or GMAIL_USER
 
-    # Modernes Apple-Design (wie zuvor)
+    today = datetime.date.today().strftime('%d.%m.%Y')
+
+    if items:
+        msg['Subject'] = f"🧬 ALS Research Update – {today}"
+        has_news = True
+    else:
+        msg['Subject'] = f"🧬 ALS Research Update – Keine neuen News ({today})"
+        has_news = False
+
+    # === HTML ===
     html = f"""
     <!DOCTYPE html>
     <html>
@@ -171,31 +168,45 @@ def send_email(items):
     <body style="margin:0; padding:0; background:#f5f5f7; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
         <div style="max-width: 620px; margin: 30px auto; background:#ffffff; border-radius: 20px; overflow:hidden; box-shadow: 0 15px 35px rgba(0,0,0,0.08);">
             
+            <!-- Header -->
             <div style="background: linear-gradient(90deg, #0071e3, #00a2ff); padding: 35px 30px; text-align:center; color:white;">
-                <h1 style="margin:0; font-size:26px; font-weight:600; letter-spacing:-0.5px;">🧬 ALS Research Update</h1>
-                <p style="margin:8px 0 0; font-size:15px; opacity:0.95;">Wichtige Phase-3 & FDA Entwicklungen • {datetime.date.today().strftime('%d.%m.%Y')}</p>
+                <h1 style="margin:0; font-size:26px; font-weight:600;">🧬 ALS Research Update</h1>
+                <p style="margin:8px 0 0; font-size:15px; opacity:0.95;">{today}</p>
             </div>
 
             <div style="padding: 30px 30px 10px;">
     """
 
-    for item in items:
-        html += f"""
+    if has_news:
+        for item in items:
+            html += f"""
                 <div style="margin-bottom: 28px; padding: 24px; background:#f8f9fa; border-radius: 16px; border-left: 5px solid #0071e3;">
                     <a href="{item['link']}" target="_blank" style="text-decoration:none; color:#1d1d1f;">
                         <h2 style="margin:0 0 14px; font-size:19px; line-height:1.3; font-weight:600;">{item['title']}</h2>
                     </a>
                     <p style="margin:0; line-height:1.65; font-size:15.5px; color:#333;">{item['ai_summary']}</p>
                     <div style="margin-top:20px;">
-                        <a href="{item['link']}" target="_blank" style="display:inline-flex; align-items:center; gap:6px; color:#0071e3; font-weight:500; font-size:14px; text-decoration:none;">Mehr lesen →</a>
+                        <a href="{item['link']}" target="_blank" style="color:#0071e3; font-weight:500; font-size:14px; text-decoration:none;">Mehr lesen →</a>
                     </div>
+                </div>
+            """
+    else:
+        html += """
+                <div style="text-align:center; padding: 40px 20px; color:#555;">
+                    <h2 style="font-size:22px; color:#0071e3;">📭 Keine neuen relevanten Nachrichten</h2>
+                    <p style="font-size:16px; line-height:1.6; max-width:420px; margin:20px auto;">
+                        In den letzten 7 Tagen wurden keine neuen Phase-3- oder FDA-relevanten ALS-Meldungen gefunden.<br><br>
+                        Der Screener läuft weiterhin täglich und meldet sich sofort, sobald es Neuigkeiten gibt.
+                    </p>
                 </div>
         """
 
     html += """
             </div>
+
+            <!-- Footer -->
             <div style="background:#f5f5f7; padding:25px 30px; text-align:center; font-size:13px; color:#666;">
-                Automatischer ALS Research Screener • Nur relevante Phase-3 / FDA News<br>
+                Automatischer ALS Research Screener • Täglich um 08:00 Uhr<br>
                 <span style="font-size:12px; opacity:0.7;">Dies ist kein medizinischer Rat. Immer die Originalquellen prüfen.</span>
             </div>
         </div>
@@ -209,7 +220,11 @@ def send_email(items):
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(GMAIL_USER, GMAIL_PASS)
             server.sendmail(GMAIL_USER, msg['To'], msg.as_string())
-        logging.info(f"✅ Email mit {len(items)} Artikeln erfolgreich versendet!")
+        
+        if has_news:
+            logging.info(f"✅ Email mit {len(items)} Artikeln versendet!")
+        else:
+            logging.info("📭 Keine neuen News – Status-Email versendet")
     except Exception as e:
         logging.error(f"❌ Email-Versand fehlgeschlagen: {e}")
 
