@@ -6,6 +6,7 @@ import os
 import logging
 import urllib.parse
 import time
+import hashlib
 import anthropic
 from pathlib import Path
 from email.mime.multipart import MIMEMultipart
@@ -35,11 +36,11 @@ def calculate_score(title: str, link: str) -> int:
     domain = urllib.parse.urlparse(link).netloc.lower()
     score = 0
 
-    # === BASIS-BONUS (sehr wichtig!) ===
+    # Basis-Bonus: Artikel muss mit ALS zu tun haben
     if "als" in text or "motor neuron" in text:
         score += 20
 
-    # === HOCHPRIORITÄT ===
+    # Hohe Priorität
     if any(k in text for k in ["approval", "approved", "zulassung", "fda approval", "ema"]):
         score += 100
     if any(k in text for k in ["phase 3", "phase iii", "pivotal"]):
@@ -47,21 +48,19 @@ def calculate_score(title: str, link: str) -> int:
     if any(k in text for k in ["phase 2", "phase ii", "phase 2b", "phase 2c", "topline"]):
         score += 35
 
-    # === TECHNOLOGIE & BREAKTHROUGHS (jetzt stark gewichtet) ===
-    if any(k in text for k in ["neuralink", "brain-computer", "bci", "brain chip", "thought control",
-                               "thought-to", "waves of will", "synchron", "brain interface", "brain-chip"]):
+    # Technologie & Breakthroughs
+    if any(k in text for k in ["neuralink", "brain-computer", "bci", "brain chip", "thought control", "synchron", "brain interface"]):
         score += 40
-    if any(k in text for k in ["breakthrough", "milestone", "game changer", "revolutionary", "transform",
-                               "life-changing", "first time", "new hope"]):
+    if any(k in text for k in ["breakthrough", "milestone", "game changer", "revolutionary", "life-changing"]):
         score += 25
 
-    # === Weitere relevante Bereiche ===
+    # Weitere relevante Bereiche
     if any(k in text for k in ["alsfrs", "nfl", "neurofilament", "biomarker", "survival", "endpoint"]):
         score += 25
     if any(k in text for k in ["gene therapy", "aso", "antisense", "stem cell", "cell therapy"]):
         score += 20
 
-    # Pipeline & allgemeine Studien
+    # Pipeline & Studien
     if "pipeline" in text or ("clinical trial" in text and "als" in text):
         score += 18
 
@@ -71,7 +70,7 @@ def calculate_score(title: str, link: str) -> int:
     if any(s in domain for s in premium):
         score += 25
 
-    # === ABZÜGE ===
+    # Abzüge
     if any(k in text for k in ["mouse", "murine", "preclinical", "animal model"]):
         score -= 40
     if any(k in text for k in ["ice bucket", "charity", "fundraiser", "spendenlauf", "donation run"]):
@@ -86,7 +85,7 @@ def call_ai_model(title, snippet):
     prompt = f"Fasse diese ALS-Forschung kurz in 2 Sätzen zusammen (Patientenfokus):\n{title}\n{snippet}"
     for model_id in [PRIMARY_MODEL, BACKUP_MODEL]:
         try:
-            logging.info(f"→ KI-Analyse mit {model_id}...")
+            logging.info(f"→ KI-Analyse mit {model_id} für: {title[:60]}...")
             response = client.messages.create(
                 model=model_id,
                 max_tokens=300,
@@ -94,51 +93,62 @@ def call_ai_model(title, snippet):
                 messages=[{"role": "user", "content": prompt}],
                 timeout=25.0
             )
-            logging.info(f"✅ Erfolg mit {model_id}")
+            logging.info(f"✅ KI erfolgreich")
             return response.content[0].text.strip()
         except Exception as e:
-            logging.warning(f"⚠️ Fehler bei {model_id}: {e}")
+            logging.warning(f"⚠️ KI-Fehler bei {model_id}: {e}")
             continue
     return "Zusammenfassung aktuell nicht verfügbar."
 
 
 def get_news():
     db_file = Path('sent_articles.json')
-    seen_urls = []
-   
+    seen_hashes = set()  # Jetzt Titel-Hash + Link für robusten Dubletten-Check
+
     if db_file.exists():
         try:
             content = db_file.read_text().strip()
             if content:
-                seen_urls = json.loads(content).get("hashes", [])
+                data = json.loads(content)
+                seen_hashes = set(data.get("hashes", []))
         except:
-            seen_urls = []
+            pass
 
-    queries = [
+    queries = [  # Deine erweiterte Liste
         'ALS (FDA OR EMA OR "regulatory approval" OR "marketing authorization" OR "Breakthrough Designation" OR "Priority Review" OR "Fast Track")',
         'ALS (NurOwn OR Pridopidine OR Tofersen OR Qalsody OR AMX0035 OR Relyvrio OR CNM-Au8 OR MN-166 OR ibudilast OR RT1999 OR smilagenin OR VHB937 OR QRL-201 OR ulefnersen)',
         'ALS ("Phoenix Trial" OR "HEALEY ALS Platform" OR "PREVAiLS" OR "EXPERTS-ALS" OR "ASTRALS")',
-        'ALS ("novel therapeutic" OR "first-in-class" OR "investigational drug" OR "new treatment" OR "emerging therapy" OR "lead candidate")',
+        'ALS ("novel therapeutic" OR "first-in-class" OR "investigational drug" OR "new treatment" OR "emerging therapy")',
         'ALS ("Phase 1" OR "Phase I" OR "Phase 2" OR "Phase II" OR "topline results" OR "interim data" OR "data readout")',
         'ALS (TDP-43 OR Stathmin-2 OR UNC13A OR FUS OR SOD1 OR C9orf72 OR "gene therapy" OR ASO OR "antisense" OR CRISPR)',
         'ALS (biomarker OR NfL OR "Neurofilament" OR "ALSFRS-R" OR pNfH)',
         'ALS ("Brain-Computer Interface" OR BCI OR Synchron OR Neuralink OR "eye-tracking" OR "brain chip")',
         'ALS ("motor neuron disease" OR "clinical trial" OR "study results" OR "breakthrough")'
     ]
-   
-    found_items = []
+
+    candidates = []   # Alle gefundenen Artikel (vor KI und Limit)
     now = datetime.datetime.now()
 
     for q in queries:
         logging.info(f"Suche: {q}")
-        feed = feedparser.parse(f"https://news.google.com/rss?q={urllib.parse.quote(q)}")
-       
+        try:
+            feed = feedparser.parse(f"https://news.google.com/rss?q={urllib.parse.quote(q)}")
+        except Exception as e:
+            logging.warning(f"Feed-Error bei Query {q}: {e}")
+            continue
+
         for entry in feed.entries:
             link = getattr(entry, 'link', '')
-            if not link or link in seen_urls:
+            title = getattr(entry, 'title', '')
+            if not link or not title:
                 continue
 
-            # Zeitfilter: letzte 14 Tage
+            # Dubletten-Check mit Titel-Hash (robuster als nur Link)
+            title_hash = hashlib.md5(title.encode('utf-8')).hexdigest()
+            if title_hash in seen_hashes or link in seen_hashes:
+                continue
+
+            # Zeitfilter: 14 Tage
             published = getattr(entry, 'published_parsed', None)
             if published:
                 try:
@@ -148,27 +158,38 @@ def get_news():
                 except:
                     pass
 
-            score = calculate_score(entry.title, link)
-
+            score = calculate_score(title, link)
             if score >= 12:
-                logging.info(f"✅ News akzeptiert ({score} Pkt.): {entry.title[:80]}...")
-                summary = call_ai_model(entry.title, getattr(entry, 'summary', ''))
-                found_items.append({
-                    'title': entry.title,
+                candidates.append({
+                    'title': title,
                     'link': link,
-                    'ai_summary': summary,
-                    'score': score
+                    'score': score,
+                    'title_hash': title_hash
                 })
-                # === WICHTIG: Nur hier wird der Artikel als "gesehen" markiert ===
-                seen_urls.append(link)
-            else:
-                logging.info(f"   → Score zu niedrig ({score}): {entry.title[:70]}...")
+                logging.info(f"✅ Kandidat gefunden ({score} Pkt.): {title[:70]}...")
 
-    found_items.sort(key=lambda x: x['score'], reverse=True)
-    found_items = found_items[:8]
+    # === WICHTIG: Erst sortieren, dann nur Top 8 behalten ===
+    candidates.sort(key=lambda x: x['score'], reverse=True)
+    final_items = candidates[:8]
 
-    db_file.write_text(json.dumps({"hashes": seen_urls[-500:]}))
-    return found_items
+    # Jetzt erst KI-Aufruf und "gesehen"-Markierung für die finalen Artikel
+    results = []
+    for item in final_items:
+        summary = call_ai_model(item['title'], "")  # snippet leer, da oft nicht brauchbar
+        results.append({
+            'title': item['title'],
+            'link': item['link'],
+            'ai_summary': summary,
+            'score': item['score']
+        })
+        # Nur wirklich versendete Artikel als gesehen markieren
+        seen_hashes.add(item['title_hash'])
+        seen_hashes.add(item['link'])
+
+    # Datenbank aktualisieren (Limit auf 2000 erhöht)
+    db_file.write_text(json.dumps({"hashes": list(seen_hashes)[-2000:]}))
+
+    return results
 
 
 def send_email(items):
@@ -208,11 +229,9 @@ def send_email(items):
                         <h2 style="margin:0 0 14px; font-size:19px; line-height:1.3; font-weight:600;">{item['title']}</h2>
                     </a>
                     <p style="margin:0; line-height:1.65; font-size:15.5px; color:#333;">{item['ai_summary']}</p>
-                    
-                    <div style="margin-top: 18px; padding-top: 12px; border-top: 1px solid #ddd; font-size:13px; color:#0071e3; font-weight:600;">
+                    <div style="margin-top:18px; padding-top:12px; border-top:1px solid #ddd; font-size:13px; color:#0071e3; font-weight:600;">
                         Relevanz: <strong>{item['score']} Punkte</strong>
                     </div>
-                    
                     <div style="margin-top:20px;">
                         <a href="{item['link']}" target="_blank" style="color:#0071e3; font-weight:500; font-size:14px; text-decoration:none;">Mehr lesen →</a>
                     </div>
@@ -243,7 +262,6 @@ def send_email(items):
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(GMAIL_USER, GMAIL_PASS)
             server.sendmail(GMAIL_USER, msg['To'], msg.as_string())
-        
         if has_news:
             logging.info(f"✅ Email mit {len(items)} Artikeln versendet!")
         else:
