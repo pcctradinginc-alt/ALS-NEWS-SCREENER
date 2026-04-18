@@ -10,7 +10,7 @@ from pathlib import Path
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-# Versuche das Anthropic-Modul zu laden, sonst installiere es (für GitHub Actions)
+# Automatisches Installieren von Anthropic in der GitHub Action Umgebung
 try:
     import anthropic
 except ImportError:
@@ -28,7 +28,10 @@ GMAIL_PASS = os.environ.get('GMAIL_PASS')
 RECIPIENT = os.environ.get('RECIPIENT')
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY')
 
-# Optimierte Suchanfragen für medizinische Relevanz
+# Globale Variable für das funktionierende Modell (Cache)
+WORKING_MODEL = None
+
+# Suchanfragen
 SEARCH_QUERIES = [
     'site:fda.gov ALS OR "Amyotrophic Lateral Sclerosis"',
     'site:ema.europa.eu ALS OR "Amyotrophic Lateral Sclerosis"',
@@ -39,32 +42,45 @@ SEARCH_QUERIES = [
     'ALS "ALSFRS-R" "significant slowing"'
 ]
 
-# --- KI ZUSAMMENFASSUNG (CLAUDE HAIKU - KOSTENEFFIZIENT) ---
+# --- KI ZUSAMMENFASSUNG (MIT ROBUSTER MODELL-SUCHE) ---
 def get_ai_summary(title, snippet):
+    global WORKING_MODEL
     if not ANTHROPIC_KEY:
         return "Zusammenfassung nicht verfügbar (API-Key fehlt)."
     
-    try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-        # Der Prompt ist auf Deutsch und zielt auf Patientenrelevanz ab
-        prompt = f"""Fasse diese ALS-Forschungsnachricht in 2 bis maximal 3 prägnanten deutschen Sätzen zusammen. 
-        Konzentriere dich auf die Bedeutung für Patienten (Zulassung, Wirksamkeit). 
-        Antworte nur mit der Zusammenfassung.
-        
-        Titel: {title}
-        Inhalt: {snippet}"""
-        
-        message = client.messages.create(
-            # Wir nutzen die stabile Haiku-Version für minimale Kosten
-            model="claude-3-haiku-20240307", 
-            max_tokens=300,
-            temperature=0,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return message.content[0].text.strip()
-    except Exception as e:
-        logging.error(f"KI-Fehler Detail: {str(e)}")
-        return "Zusammenfassung aktuell nicht verfügbar."
+    # Mögliche Haiku-Modellnamen für 2026 (günstigste Kategorie)
+    haiku_models = [
+        "claude-3-5-haiku-latest",
+        "claude-3-5-haiku-20241022",
+        "claude-3-haiku-20240307"
+    ]
+    
+    # Wenn wir bereits wissen, welches Modell geht, nutzen wir es direkt
+    models_to_test = [WORKING_MODEL] if WORKING_MODEL else haiku_models
+    
+    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+    prompt = f"""Fasse diese ALS-Forschungsnachricht in 2-3 prägnanten deutschen Sätzen zusammen. 
+    Konzentriere dich auf die Bedeutung für Patienten. Antworte nur mit der Zusammenfassung.
+    
+    Titel: {title}
+    Inhalt: {snippet}"""
+
+    for model_name in models_to_test:
+        if not model_name: continue
+        try:
+            message = client.messages.create(
+                model=model_name, 
+                max_tokens=300,
+                temperature=0,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            WORKING_MODEL = model_name # Modell für nächsten Aufruf speichern
+            return message.content[0].text.strip()
+        except Exception as e:
+            logging.warning(f"Modell {model_name} fehlgeschlagen: {e}")
+            continue
+            
+    return "Zusammenfassung konnte aufgrund eines technischen Fehlers nicht erstellt werden."
 
 # --- SCORING LOGIK ---
 def calculate_score(entry):
@@ -73,19 +89,15 @@ def calculate_score(entry):
     summary = entry.summary if hasattr(entry, 'summary') else ""
     text = (title + " " + summary).lower()
     
-    # Priorität auf Zulassungen und späte Phasen
     if any(x in text for x in ["fda approval", "ema approved", "zulassung"]): score += 100
-    if any(x in text for x in ["phase 3", "phase iii", "pivotal", "top-line"]): score += 50
+    if any(x in text for x in ["phase 3", "phase iii", "pivotal"]): score += 50
     if "alsfrs-r" in text: score += 25
     
-    # Quellen-Bonus
     link = entry.link.lower() if hasattr(entry, 'link') else ""
-    if any(dom in link for dom in ["fda.gov", "ema.europa.eu", "nature.com", "nejm.org"]):
+    if any(dom in link for dom in ["fda.gov", "ema.europa.eu", "nature.com"]):
         score *= 2.5
     
-    # Abzüge für Grundlagenforschung/Hype
-    if any(x in text for x in ["mouse", "mice", "animal model", "preclinical"]): score -= 40
-    if any(x in text for x in ["icebucket", "walk", "fundraiser"]): score -= 60
+    if any(x in text for x in ["mouse", "mice", "animal model"]): score -= 40
     
     return int(score)
 
@@ -102,7 +114,7 @@ def get_news():
     all_news = []
     for q in SEARCH_QUERIES:
         encoded_query = urllib.parse.quote(q)
-        rss_url = f"https://news.google.com/rss/search?q={encoded_query}"
+        rss_url = f"https://news.google.com/rss?q={encoded_query}"
         logging.info(f"Suche: {q}")
         feed = feedparser.parse(rss_url)
         
@@ -110,32 +122,28 @@ def get_news():
             link = getattr(entry, 'link', '')
             if link and link not in seen_urls:
                 score = calculate_score(entry)
-                # Zusammenfassung nur für Artikel mit echtem Nachrichtenwert
                 if score >= 40: 
                     snippet = getattr(entry, 'summary', '')
                     logging.info(f"KI-Analyse für: {entry.title[:50]}...")
                     ai_summary = get_ai_summary(entry.title, snippet)
                     
                     all_news.append({
-                        'title': getattr(entry, 'title', 'Kein Titel'),
+                        'title': getattr(entry, 'title', 'Unbekannter Titel'),
                         'link': link,
                         'score': score,
-                        'date': getattr(entry, 'published', 'Kürzlich'),
+                        'date': getattr(entry, 'published', 'Heute'),
                         'ai_summary': ai_summary
                     })
                     seen_urls.append(link)
     
-    # Sortierung nach Wichtigkeit
     all_news = sorted(all_news, key=lambda x: x['score'], reverse=True)
-    
-    # Datenbank aktualisieren
     db_file.write_text(json.dumps({"hashes": seen_urls[-300:]}))
     return all_news[:15]
 
 # --- EMAIL VERSAND ---
 def send_email(news_items):
     if not news_items:
-        logging.info("Keine neuen relevanten News gefunden.")
+        logging.info("Keine relevanten News gefunden.")
         return
 
     msg = MIMEMultipart('alternative')
@@ -145,52 +153,30 @@ def send_email(news_items):
 
     html = f"""
     <html>
-    <body style="font-family: -apple-system, system-ui, sans-serif; background-color: #f5f5f7; margin: 0; padding: 20px;">
-        <div style="max-width: 600px; margin: auto; background: white; padding: 40px; border-radius: 24px; box-shadow: 0 10px 40px rgba(0,0,0,0.06);">
-            <header style="border-bottom: 0.5px solid #d2d2d7; padding-bottom: 25px; margin-bottom: 35px;">
-                <p style="color: #0071e3; font-weight: 600; font-size: 13px; text-transform: uppercase; margin: 0; letter-spacing: 0.8px;">Premium Digest</p>
-                <h1 style="font-size: 28px; font-weight: 700; color: #1d1d1f; margin: 6px 0 0 0;">ALS Research News</h1>
-            </header>
+    <body style="font-family: sans-serif; background-color: #f5f5f7; padding: 20px;">
+        <div style="max-width: 600px; margin: auto; background: white; padding: 30px; border-radius: 20px;">
+            <h1 style="font-size: 24px; color: #1d1d1f; border-bottom: 1px solid #eee; padding-bottom: 10px;">ALS Research News</h1>
     """
-
     for item in news_items:
-        score_color = "#34c759" if item['score'] >= 90 else "#0071e3"
         html += f"""
-            <div style="margin-bottom: 40px;">
-                <span style="font-size: 10px; font-weight: 700; color: white; background: {score_color}; padding: 4px 12px; border-radius: 12px; display: inline-block; margin-bottom: 12px;">SCORE: {item['score']}</span>
-                <h2 style="font-size: 20px; font-weight: 600; margin: 0 0 10px 0; line-height: 1.3;">
-                    <a href="{item['link']}" style="color: #1d1d1f; text-decoration: none;">{item['title']}</a>
-                </h2>
-                <div style="background-color: #f9f9fb; border-left: 4px solid #0071e3; padding: 15px; margin-bottom: 15px; border-radius: 4px;">
-                    <p style="font-size: 15px; color: #1d1d1f; line-height: 1.5; margin: 0; font-style: italic;">
-                        {item['ai_summary']}
-                    </p>
-                </div>
-                <p style="font-size: 12px; color: #86868b; margin: 0;">{item['date']} • <a href="{item['link']}" style="color: #0071e3; text-decoration: none; font-weight: 500;">Link zur Quelle →</a></p>
+            <div style="margin-bottom: 30px;">
+                <span style="background: #0071e3; color: white; padding: 3px 10px; border-radius: 10px; font-size: 11px;">SCORE: {item['score']}</span>
+                <h2 style="font-size: 18px; margin: 10px 0;"><a href="{item['link']}" style="color: #1d1d1f; text-decoration: none;">{item['title']}</a></h2>
+                <p style="background: #f9f9fb; padding: 15px; border-radius: 10px; font-style: italic; color: #333;">{item['ai_summary']}</p>
+                <p style="font-size: 12px; color: #888;">{item['date']} • <a href="{item['link']}">Originalquelle</a></p>
             </div>
         """
-
-    html += """
-            <footer style="margin-top: 50px; padding-top: 25px; border-top: 0.5px solid #d2d2d7; text-align: center;">
-                <p style="font-size: 11px; color: #86868b;">Generiert mit Claude Haiku Intelligence. <br> Täglicher ALS Forschungs-Filter.</p>
-            </footer>
-        </div>
-    </body>
-    </html>
-    """
-
+    html += "</div></body></html>"
     msg.attach(MIMEText(html, 'html'))
 
     try:
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(GMAIL_USER, GMAIL_PASS)
             server.sendmail(GMAIL_USER, msg['To'], msg.as_string())
-        logging.info("Email erfolgreich versendet.")
+        logging.info("Erfolgreich versendet.")
     except Exception as e:
         logging.error(f"Email Fehler: {e}")
 
 if __name__ == "__main__":
-    logging.info("=== ALS Intelligence Screener Start ===")
     results = get_news()
     send_email(results)
-    logging.info("=== Screener Beendet ===")
