@@ -1,0 +1,37 @@
+name: Daily ALS News
+on:
+  schedule:
+    - cron: '0 7 * * *' # Täglich 08:00 Uhr deutsche Zeit
+  workflow_dispatch: # Erlaubt manuellen Start per Button
+
+jobs:
+  run-screener:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Wichtig, damit das Programm die Liste gesendeter Mails speichern kann
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Dependencies
+        run: pip install feedparser requests beautifulsoup4
+
+      - name: Run Scraper
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_PASS: ${{ secrets.GMAIL_APP_PASSWORD }}
+          RECIPIENT: ${{ secrets.RECIPIENT_EMAIL }}
+        run: python main.py
+
+      - name: Commit & Push Changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add sent_articles.json
+          git commit -m "Update sent articles database" || exit 0
+          git push
