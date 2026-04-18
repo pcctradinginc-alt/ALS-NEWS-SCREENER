@@ -1,37 +1,47 @@
 name: Daily ALS News
+
 on:
   schedule:
-    - cron: '0 7 * * *' # Täglich 08:00 Uhr deutsche Zeit
-  workflow_dispatch: # Erlaubt manuellen Start per Button
+    - cron: '0 7 * * *' # Täglich um 08:00 Uhr deutscher Zeit (UTC+1)
+  workflow_dispatch: # Erlaubt es dir, den Screener jederzeit manuell über den "Run workflow" Button zu starten
 
 jobs:
   run-screener:
     runs-on: ubuntu-latest
+    
+    # Berechtigungen, um die sent_articles.json wieder im Repo speichern zu können
     permissions:
-      contents: write # Wichtig, damit das Programm die Liste gesendeter Mails speichern kann
+      contents: write
+
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4 # Aktualisiert auf v4 für bessere Performance
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.9'
 
       - name: Install Dependencies
-        run: pip install feedparser requests beautifulsoup4
+        run: |
+          python -m pip install --upgrade pip
+          pip install feedparser requests beautifulsoup4 anthropic
 
       - name: Run Scraper
         env:
+          # Hier werden deine GitHub Secrets an das Python-Script übergeben
           GMAIL_USER: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_PASS: ${{ secrets.GMAIL_APP_PASSWORD }}
           RECIPIENT: ${{ secrets.RECIPIENT_EMAIL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python main.py
 
       - name: Commit & Push Changes
+        # Dieser Schritt speichert die aktualisierte sent_articles.json, 
+        # damit du keine News doppelt bekommst.
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add sent_articles.json
-          git commit -m "Update sent articles database" || exit 0
+          git commit -m "Update database: Mark articles as sent" || exit 0
           git push
