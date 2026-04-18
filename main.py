@@ -35,25 +35,31 @@ def calculate_score(title: str, link: str) -> int:
     domain = urllib.parse.urlparse(link).netloc.lower()
     score = 0
 
-    # === SEHR BREITE POSITIVE PUNKTE ===
+    # === BASIS-BONUS (sehr wichtig!) ===
+    if "als" in text or "motor neuron" in text:
+        score += 20
+
+    # === HOCHPRIORITÄT ===
     if any(k in text for k in ["approval", "approved", "zulassung", "fda approval", "ema"]):
         score += 100
     if any(k in text for k in ["phase 3", "phase iii", "pivotal"]):
         score += 60
     if any(k in text for k in ["phase 2", "phase ii", "phase 2b", "phase 2c", "topline"]):
         score += 35
+
+    # === TECHNOLOGIE & BREAKTHROUGHS (jetzt stark gewichtet) ===
+    if any(k in text for k in ["neuralink", "brain-computer", "bci", "brain chip", "thought control",
+                               "thought-to", "waves of will", "synchron", "brain interface", "brain-chip"]):
+        score += 40
+    if any(k in text for k in ["breakthrough", "milestone", "game changer", "revolutionary", "transform",
+                               "life-changing", "first time", "new hope"]):
+        score += 25
+
+    # === Weitere relevante Bereiche ===
     if any(k in text for k in ["alsfrs", "nfl", "neurofilament", "biomarker", "survival", "endpoint"]):
         score += 25
     if any(k in text for k in ["gene therapy", "aso", "antisense", "stem cell", "cell therapy"]):
         score += 20
-
-    # === TECHNOLOGIE & BREAKTHROUGHS (wird jetzt stark gewichtet) ===
-    if any(k in text for k in ["neuralink", "brain-computer", "bci", "brain chip", "thought control", 
-                               "thought-to", "waves of will", "synchron", "brain interface", "brain chip"]):
-        score += 40
-    if any(k in text for k in ["breakthrough", "milestone", "game changer", "revolutionary", "transform", 
-                               "life-changing", "first time", "new hope"]):
-        score += 25
 
     # Pipeline & allgemeine Studien
     if "pipeline" in text or ("clinical trial" in text and "als" in text):
@@ -108,7 +114,6 @@ def get_news():
         except:
             seen_urls = []
 
-    # Deine erweiterte Query-Liste
     queries = [
         'ALS (FDA OR EMA OR "regulatory approval" OR "marketing authorization" OR "Breakthrough Designation" OR "Priority Review" OR "Fast Track")',
         'ALS (NurOwn OR Pridopidine OR Tofersen OR Qalsody OR AMX0035 OR Relyvrio OR CNM-Au8 OR MN-166 OR ibudilast OR RT1999 OR smilagenin OR VHB937 OR QRL-201 OR ulefnersen)',
@@ -144,6 +149,7 @@ def get_news():
                     pass
 
             score = calculate_score(entry.title, link)
+
             if score >= 12:
                 logging.info(f"✅ News akzeptiert ({score} Pkt.): {entry.title[:80]}...")
                 summary = call_ai_model(entry.title, getattr(entry, 'summary', ''))
@@ -153,12 +159,11 @@ def get_news():
                     'ai_summary': summary,
                     'score': score
                 })
+                # === WICHTIG: Nur hier wird der Artikel als "gesehen" markiert ===
+                seen_urls.append(link)
             else:
                 logging.info(f"   → Score zu niedrig ({score}): {entry.title[:70]}...")
 
-            seen_urls.append(link)
-
-    # Sortierung nach Score (höchste zuerst)
     found_items.sort(key=lambda x: x['score'], reverse=True)
     found_items = found_items[:8]
 
@@ -204,7 +209,6 @@ def send_email(items):
                     </a>
                     <p style="margin:0; line-height:1.65; font-size:15.5px; color:#333;">{item['ai_summary']}</p>
                     
-                    <!-- Score-Anzeige -->
                     <div style="margin-top: 18px; padding-top: 12px; border-top: 1px solid #ddd; font-size:13px; color:#0071e3; font-weight:600;">
                         Relevanz: <strong>{item['score']} Punkte</strong>
                     </div>
