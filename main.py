@@ -23,7 +23,7 @@ ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY')
 if not ANTHROPIC_KEY:
     raise ValueError("❌ ANTHROPIC_API_KEY fehlt!")
 
-# --- MODELL-IDs (Stand April 2026) ---
+# --- MODELL-IDs ---
 PRIMARY_MODEL = "claude-haiku-4-5-20251001"
 BACKUP_MODEL  = "claude-sonnet-4-6"
 
@@ -31,7 +31,7 @@ client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 
 def calculate_score(title: str, link: str) -> int:
-    """Vorschlag 2 – Mittleres Punktesystem"""
+    """Lockerere Version – Schwellwert jetzt bei 15 Punkten"""
     text = title.lower()
     domain = urllib.parse.urlparse(link).netloc.lower()
     score = 0
@@ -41,7 +41,7 @@ def calculate_score(title: str, link: str) -> int:
         score += 100
     if any(k in text for k in ["phase 3", "phase iii", "pivotal"]):
         score += 60
-    if any(k in text for k in ["phase 2b", "phase 2c", "positive topline", "phase ii"]):
+    if any(k in text for k in ["phase 2", "phase ii", "phase 2b", "phase 2c", "topline"]):
         score += 35
     if any(k in text for k in ["alsfrs", "nfl", "neurofilament", "biomarker", "survival", "endpoint"]):
         score += 25
@@ -87,7 +87,6 @@ def call_ai_model(title, snippet):
 
 
 def get_news():
-    # ... (unverändert – Scoring, 7-Tage-Filter, max 8 Artikel)
     db_file = Path('sent_articles.json')
     seen_urls = []
    
@@ -116,19 +115,19 @@ def get_news():
             if not link or link in seen_urls:
                 continue
 
-            # Zeitfilter: letzte 7 Tage (168 Stunden)
+            # Zeitfilter: letzte 14 Tage
             published = getattr(entry, 'published_parsed', None)
             if published:
                 try:
                     pub_dt = datetime.datetime.fromtimestamp(time.mktime(published))
-                    if (now - pub_dt).total_seconds() > 168 * 3600:
+                    if (now - pub_dt).total_seconds() > 14 * 24 * 3600:
                         continue
                 except:
                     pass
 
             score = calculate_score(entry.title, link)
-            if score >= 20:                     # <-- hier kannst du später noch feinjustieren
-                logging.info(f"High-Score News gefunden ({score} Pkt.): {entry.title[:70]}...")
+            if score >= 15:                    # ← jetzt deutlich lockerer
+                logging.info(f"News gefunden ({score} Pkt.): {entry.title[:70]}...")
                 summary = call_ai_model(entry.title, getattr(entry, 'summary', ''))
                 found_items.append({
                     'title': entry.title,
@@ -160,7 +159,6 @@ def send_email(items):
         msg['Subject'] = f"🧬 ALS Research Update – Keine neuen News ({today})"
         has_news = False
 
-    # === HTML ===
     html = f"""
     <!DOCTYPE html>
     <html>
@@ -168,7 +166,6 @@ def send_email(items):
     <body style="margin:0; padding:0; background:#f5f5f7; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
         <div style="max-width: 620px; margin: 30px auto; background:#ffffff; border-radius: 20px; overflow:hidden; box-shadow: 0 15px 35px rgba(0,0,0,0.08);">
             
-            <!-- Header -->
             <div style="background: linear-gradient(90deg, #0071e3, #00a2ff); padding: 35px 30px; text-align:center; color:white;">
                 <h1 style="margin:0; font-size:26px; font-weight:600;">🧬 ALS Research Update</h1>
                 <p style="margin:8px 0 0; font-size:15px; opacity:0.95;">{today}</p>
@@ -194,20 +191,15 @@ def send_email(items):
         html += """
                 <div style="text-align:center; padding: 40px 20px; color:#555;">
                     <h2 style="font-size:22px; color:#0071e3;">📭 Keine neuen relevanten Nachrichten</h2>
-                    <p style="font-size:16px; line-height:1.6; max-width:420px; margin:20px auto;">
-                        In den letzten 7 Tagen wurden keine neuen Phase-3- oder FDA-relevanten ALS-Meldungen gefunden.<br><br>
-                        Der Screener läuft weiterhin täglich und meldet sich sofort, sobald es Neuigkeiten gibt.
-                    </p>
+                    <p style="font-size:16px; line-height:1.6;">In den letzten 14 Tagen wurden keine neuen ALS-Meldungen mit ausreichender Relevanz gefunden.<br><br>Der Screener läuft weiter und meldet sich sofort, sobald etwas Neues erscheint.</p>
                 </div>
         """
 
     html += """
             </div>
-
-            <!-- Footer -->
             <div style="background:#f5f5f7; padding:25px 30px; text-align:center; font-size:13px; color:#666;">
                 Automatischer ALS Research Screener • Täglich um 08:00 Uhr<br>
-                <span style="font-size:12px; opacity:0.7;">Dies ist kein medizinischer Rat. Immer die Originalquellen prüfen.</span>
+                <span style="font-size:12px; opacity:0.7;">Dies ist kein medizinischer Rat.</span>
             </div>
         </div>
     </body>
