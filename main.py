@@ -5,7 +5,6 @@ import json
 import os
 import logging
 import urllib.parse
-import time
 import anthropic
 from pathlib import Path
 from email.mime.multipart import MIMEMultipart
@@ -14,73 +13,62 @@ from email.mime.text import MIMEText
 # --- LOGGING ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
-# --- KONFIGURATION & VALIDIERUNG ---
+# --- KONFIGURATION ---
 GMAIL_USER = os.environ.get('GMAIL_USER') 
 GMAIL_PASS = os.environ.get('GMAIL_PASS')
 RECIPIENT = os.environ.get('RECIPIENT')
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY')
 
 if not ANTHROPIC_KEY:
-    raise ValueError("❌ ANTHROPIC_API_KEY fehlt in den GitHub Secrets!")
+    raise ValueError("❌ ANTHROPIC_API_KEY fehlt!")
 
-# Das stabilste Modell (feste Version gegen 404-Fehler)
-STABLE_MODEL = "claude-3-haiku-20240307"
+# --- 2026 MODELL-IDENTIFIKATOREN ---
+# Haiku 4.5 ist laut Dokumentation (Stand April 2026) das effizienteste Modell.
+# Wir nutzen die exakte Versions-ID, um 404-Fehler zu vermeiden.
+PRIMARY_MODEL = "claude-4-5-haiku-20251015"
+BACKUP_MODEL  = "claude-4-6-sonnet-20260218"
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
-# --- KI FUNKTION (STABIL & SCHNELL) ---
 def call_ai_model(title, snippet):
-    prompt = f"""Fasse diese ALS-Forschung in 2 Sätzen zusammen. Fokus: Bedeutung für Patienten.
-    Titel: {title}
-    Inhalt: {snippet}"""
-
-    try:
-        logging.info(f"→ KI-Analyse mit {STABLE_MODEL}...")
-        response = client.messages.create(
-            model=STABLE_MODEL,
-            max_tokens=300,
-            temperature=0.3,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=30.0 
-        )
-        logging.info(f"✅ KI Erfolg")
-        return response.content[0].text.strip()
-    except Exception as e:
-        logging.error(f"⚠️ KI Fehler bei {STABLE_MODEL}: {e}")
-        return "Zusammenfassung aktuell nicht verfügbar."
-
-# --- SCORING ---
-def calculate_score(entry):
-    score = 0
-    text = (getattr(entry, 'title', '') + " " + getattr(entry, 'summary', '')).lower()
+    prompt = f"Fasse diese ALS-Forschung kurz in 2 Sätzen zusammen (Patientenfokus):\n{title}\n{snippet}"
     
-    # Kritische Begriffe (Gewichtung 2026)
-    if any(x in text for x in ["fda approval", "ema approved", "zulassung"]): score += 100
-    if any(x in text for x in ["phase 3", "phase iii", "pivotal"]): score += 70
-    if "alsfrs-r" in text: score += 30
-    
-    # Ausschlusskriterien (Tierstudien)
-    if any(x in text for x in ["mouse", "mice", "animal model", "in vitro"]): score -= 60
-    
-    return int(score)
+    # Kette: Erst Haiku (günstig), bei Fehler Sonnet (Backup)
+    for model_id in [PRIMARY_MODEL, BACKUP_MODEL]:
+        try:
+            logging.info(f"→ KI-Analyse mit {model_id}...")
+            response = client.messages.create(
+                model=model_id,
+                max_tokens=300,
+                temperature=0.3,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=25.0
+            )
+            logging.info(f"✅ Erfolg mit {model_id}")
+            return response.content[0].text.strip()
+        except Exception as e:
+            logging.warning(f"⚠️ Fehler bei {model_id}: {e}")
+            continue
+            
+    return "Zusammenfassung aktuell nicht verfügbar."
 
-# --- DATENBESCHAFFUNG ---
 def get_news():
     db_file = Path('sent_articles.json')
     seen_urls = []
     
-    # Fix: Robuster JSON-Import (verhindert JSONDecodeError)
+    # Robuster Datenbank-Import
     if db_file.exists():
         try:
             content = db_file.read_text().strip()
             if content:
                 seen_urls = json.loads(content).get("hashes", [])
-        except Exception as e:
-            logging.warning(f"⚠️ DB korrupt, starte neu: {e}")
-
+        except:
+            seen_urls = []
+    
+    # Suche nach Durchbrüchen (Phase 3 und FDA)
     queries = [
-        'site:fda.gov ALS OR "Amyotrophic Lateral Sclerosis"',
-        'ALS "Phase 3" OR "Pivotal" OR "Top-line results"'
+        'site:fda.gov ALS "Phase 3"',
+        'ALS "Pivotal" results "Phase 3"'
     ]
     
     found_items = []
@@ -91,64 +79,59 @@ def get_news():
         for entry in feed.entries:
             link = getattr(entry, 'link', '')
             if link and link not in seen_urls:
-                score = calculate_score(entry)
-                
-                # Nur Top-News (> 70) werden verarbeitet
-                if score >= 70:
-                    logging.info(f"High-Score ({score}): {entry.title[:50]}...")
+                text = entry.title.lower()
+                # Score-Logik: Nur wichtige News
+                if any(x in text for x in ["phase 3", "phase iii", "pivotal", "fda", "approval"]):
+                    logging.info(f"High-Score News gefunden: {entry.title[:60]}...")
                     summary = call_ai_model(entry.title, getattr(entry, 'summary', ''))
                     found_items.append({
                         'title': entry.title,
                         'link': link,
-                        'score': score,
                         'ai_summary': summary
                     })
-                # Wir markieren den Link als "gesehen", egal welcher Score
                 seen_urls.append(link)
     
-    # DB Speichern (begrenzt auf letzte 500 Links)
-    try:
-        db_file.write_text(json.dumps({"hashes": seen_urls[-500:]}))
-    except Exception as e:
-        logging.error(f"Fehler beim Speichern der DB: {e}")
-        
-    return sorted(found_items, key=lambda x: x['score'], reverse=True)[:10]
+    # Datenbank aktualisieren (letzte 500 Links)
+    db_file.write_text(json.dumps({"hashes": seen_urls[-500:]}))
+    return found_items[:10]
 
-# --- EMAIL VERSAND ---
 def send_email(items):
     if not items:
-        logging.info("Keine neuen relevanten High-Score News.")
+        logging.info("Keine neuen relevanten News gefunden.")
         return
-    
+        
     msg = MIMEMultipart('alternative')
     msg['Subject'] = f"🧬 ALS Research Update - {datetime.date.today().strftime('%d.%m.%Y')}"
     msg['From'] = GMAIL_USER
-    msg['To'] = RECIPIENT if RECIPIENT else GMAIL_USER
-
-    html = f"""
+    msg['To'] = RECIPIENT or GMAIL_USER
+    
+    html = """
     <html>
-    <body style="font-family: sans-serif; color: #333;">
-        <h2 style="color: #0071e3; border-bottom: 2px solid #0071e3;">Top ALS News (Pivotal & FDA)</h2>
+    <body style="font-family: Arial, sans-serif; color: #333;">
+        <h2 style="color: #0071e3; border-bottom: 2px solid #0071e3; padding-bottom: 10px;">
+            Wichtige ALS-Forschungsergebnisse (Phase 3 / FDA)
+        </h2>
     """
     for item in items:
         html += f"""
-        <div style="margin-bottom: 20px; padding: 10px; border-left: 5px solid #d70015; background: #f9f9f9;">
-            <b style="color: #d70015;">Score: {item['score']}</b><br>
-            <a href="{item['link']}" style="font-size: 18px; font-weight: bold; text-decoration: none; color: #1d1d1f;">{item['title']}</a>
-            <p style="margin-top: 10px; font-style: italic;">{item['ai_summary']}</p>
+        <div style="margin-bottom: 25px; padding: 15px; background-color: #f5f5f7; border-radius: 10px;">
+            <a href="{item['link']}" style="font-size: 18px; font-weight: bold; color: #1d1d1f; text-decoration: none;">
+                {item['title']}
+            </a>
+            <p style="margin-top: 10px; line-height: 1.5; color: #424245;">{item['ai_summary']}</p>
         </div>
         """
     html += "</body></html>"
     
     msg.attach(MIMEText(html, 'html'))
-
+    
     try:
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(GMAIL_USER, GMAIL_PASS)
             server.sendmail(GMAIL_USER, msg['To'], msg.as_string())
         logging.info("✅ Email erfolgreich versendet!")
     except Exception as e:
-        logging.error(f"❌ Email-Fehler: {e}")
+        logging.error(f"❌ Email-Versand fehlgeschlagen: {e}")
 
 if __name__ == "__main__":
     results = get_news()
