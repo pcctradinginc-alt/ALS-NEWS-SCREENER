@@ -14,7 +14,7 @@ from email.mime.text import MIMEText
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 # --- KONFIGURATION ---
-GMAIL_USER = os.environ.get('GMAIL_USER') 
+GMAIL_USER = os.environ.get('GMAIL_USER')
 GMAIL_PASS = os.environ.get('GMAIL_PASS')
 RECIPIENT = os.environ.get('RECIPIENT')
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY')
@@ -22,17 +22,18 @@ ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY')
 if not ANTHROPIC_KEY:
     raise ValueError("❌ ANTHROPIC_API_KEY fehlt!")
 
-# --- 2026 MODELL-IDENTIFIKATOREN ---
-# Haiku 4.5 ist laut Dokumentation (Stand April 2026) das effizienteste Modell.
-# Wir nutzen die exakte Versions-ID, um 404-Fehler zu vermeiden.
-PRIMARY_MODEL = "claude-4-5-haiku-20251015"
-BACKUP_MODEL  = "claude-4-6-sonnet-20260218"
+# --- AKTUALISIERTE MODELL-IDs (Stand April 2026) ---
+# Haiku 4.5 = schnellstes & günstigstes Modell
+# Sonnet 4.6 = starker Backup
+PRIMARY_MODEL = "claude-haiku-4-5-20251001"
+BACKUP_MODEL  = "claude-sonnet-4-6"
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
+
 def call_ai_model(title, snippet):
     prompt = f"Fasse diese ALS-Forschung kurz in 2 Sätzen zusammen (Patientenfokus):\n{title}\n{snippet}"
-    
+   
     # Kette: Erst Haiku (günstig), bei Fehler Sonnet (Backup)
     for model_id in [PRIMARY_MODEL, BACKUP_MODEL]:
         try:
@@ -49,13 +50,14 @@ def call_ai_model(title, snippet):
         except Exception as e:
             logging.warning(f"⚠️ Fehler bei {model_id}: {e}")
             continue
-            
+           
     return "Zusammenfassung aktuell nicht verfügbar."
+
 
 def get_news():
     db_file = Path('sent_articles.json')
     seen_urls = []
-    
+   
     # Robuster Datenbank-Import
     if db_file.exists():
         try:
@@ -64,18 +66,18 @@ def get_news():
                 seen_urls = json.loads(content).get("hashes", [])
         except:
             seen_urls = []
-    
+   
     # Suche nach Durchbrüchen (Phase 3 und FDA)
     queries = [
         'site:fda.gov ALS "Phase 3"',
         'ALS "Pivotal" results "Phase 3"'
     ]
-    
+   
     found_items = []
     for q in queries:
         logging.info(f"Suche: {q}")
         feed = feedparser.parse(f"https://news.google.com/rss?q={urllib.parse.quote(q)}")
-        
+       
         for entry in feed.entries:
             link = getattr(entry, 'link', '')
             if link and link not in seen_urls:
@@ -90,21 +92,22 @@ def get_news():
                         'ai_summary': summary
                     })
                 seen_urls.append(link)
-    
+   
     # Datenbank aktualisieren (letzte 500 Links)
     db_file.write_text(json.dumps({"hashes": seen_urls[-500:]}))
     return found_items[:10]
+
 
 def send_email(items):
     if not items:
         logging.info("Keine neuen relevanten News gefunden.")
         return
-        
+       
     msg = MIMEMultipart('alternative')
     msg['Subject'] = f"🧬 ALS Research Update - {datetime.date.today().strftime('%d.%m.%Y')}"
     msg['From'] = GMAIL_USER
     msg['To'] = RECIPIENT or GMAIL_USER
-    
+   
     html = """
     <html>
     <body style="font-family: Arial, sans-serif; color: #333;">
@@ -122,9 +125,9 @@ def send_email(items):
         </div>
         """
     html += "</body></html>"
-    
+   
     msg.attach(MIMEText(html, 'html'))
-    
+   
     try:
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(GMAIL_USER, GMAIL_PASS)
@@ -132,6 +135,7 @@ def send_email(items):
         logging.info("✅ Email erfolgreich versendet!")
     except Exception as e:
         logging.error(f"❌ Email-Versand fehlgeschlagen: {e}")
+
 
 if __name__ == "__main__":
     results = get_news()
