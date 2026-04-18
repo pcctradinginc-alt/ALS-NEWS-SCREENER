@@ -7,6 +7,7 @@ import logging
 import urllib.parse
 import time
 import hashlib
+import re
 import anthropic
 from pathlib import Path
 from email.mime.multipart import MIMEMultipart
@@ -31,12 +32,23 @@ BACKUP_MODEL  = "claude-sonnet-4-6"
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 
+def normalize_title(title: str) -> str:
+    """Normalisiert Titel für besseren Dubletten-Check"""
+    text = title.lower()
+    text = re.sub(r'[^\w\s]', '', text)          # Satzzeichen entfernen
+    text = re.sub(r'\s+', ' ', text).strip()     # Mehrfache Leerzeichen entfernen
+    # Häufige überflüssige Wörter entfernen
+    for word in ["the", "a", "an", "of", "in", "on", "for", "with", "als", "patient", "patients"]:
+        text = text.replace(f" {word} ", " ")
+    return text.strip()
+
+
 def calculate_score(title: str, link: str) -> int:
     text = title.lower()
     domain = urllib.parse.urlparse(link).netloc.lower()
     score = 0
 
-    # Basis-Bonus: Artikel muss mit ALS zu tun haben
+    # Basis-Bonus
     if "als" in text or "motor neuron" in text:
         score += 20
 
@@ -54,7 +66,7 @@ def calculate_score(title: str, link: str) -> int:
     if any(k in text for k in ["breakthrough", "milestone", "game changer", "revolutionary", "life-changing"]):
         score += 25
 
-    # Weitere relevante Bereiche
+    # Weitere Bereiche
     if any(k in text for k in ["alsfrs", "nfl", "neurofilament", "biomarker", "survival", "endpoint"]):
         score += 25
     if any(k in text for k in ["gene therapy", "aso", "antisense", "stem cell", "cell therapy"]):
@@ -78,14 +90,14 @@ def calculate_score(title: str, link: str) -> int:
     if any(s in domain for s in ["marketwatch", "yahoo.com/finance", "seekingalpha", "fool.com"]):
         score -= 30
 
-    return max(0, score)
+    return max(0, min(100, score))   # Max 100 Punkte
 
 
 def call_ai_model(title, snippet):
     prompt = f"Fasse diese ALS-Forschung kurz in 2 Sätzen zusammen (Patientenfokus):\n{title}\n{snippet}"
     for model_id in [PRIMARY_MODEL, BACKUP_MODEL]:
         try:
-            logging.info(f"→ KI-Analyse mit {model_id} für: {title[:60]}...")
+            logging.info(f"→ KI-Analyse: {title[:60]}...")
             response = client.messages.create(
                 model=model_id,
                 max_tokens=300,
@@ -96,14 +108,14 @@ def call_ai_model(title, snippet):
             logging.info(f"✅ KI erfolgreich")
             return response.content[0].text.strip()
         except Exception as e:
-            logging.warning(f"⚠️ KI-Fehler bei {model_id}: {e}")
+            logging.warning(f"⚠️ KI-Fehler: {e}")
             continue
     return "Zusammenfassung aktuell nicht verfügbar."
 
 
 def get_news():
     db_file = Path('sent_articles.json')
-    seen_hashes = set()  # Jetzt Titel-Hash + Link für robusten Dubletten-Check
+    seen_hashes = set()
 
     if db_file.exists():
         try:
@@ -114,7 +126,7 @@ def get_news():
         except:
             pass
 
-    queries = [  # Deine erweiterte Liste
+    queries = [  # Deine gute Liste
         'ALS (FDA OR EMA OR "regulatory approval" OR "marketing authorization" OR "Breakthrough Designation" OR "Priority Review" OR "Fast Track")',
         'ALS (NurOwn OR Pridopidine OR Tofersen OR Qalsody OR AMX0035 OR Relyvrio OR CNM-Au8 OR MN-166 OR ibudilast OR RT1999 OR smilagenin OR VHB937 OR QRL-201 OR ulefnersen)',
         'ALS ("Phoenix Trial" OR "HEALEY ALS Platform" OR "PREVAiLS" OR "EXPERTS-ALS" OR "ASTRALS")',
@@ -126,7 +138,7 @@ def get_news():
         'ALS ("motor neuron disease" OR "clinical trial" OR "study results" OR "breakthrough")'
     ]
 
-    candidates = []   # Alle gefundenen Artikel (vor KI und Limit)
+    candidates = []
     now = datetime.datetime.now()
 
     for q in queries:
@@ -134,7 +146,7 @@ def get_news():
         try:
             feed = feedparser.parse(f"https://news.google.com/rss?q={urllib.parse.quote(q)}")
         except Exception as e:
-            logging.warning(f"Feed-Error bei Query {q}: {e}")
+            logging.warning(f"Feed-Error: {e}")
             continue
 
         for entry in feed.entries:
@@ -143,12 +155,14 @@ def get_news():
             if not link or not title:
                 continue
 
-            # Dubletten-Check mit Titel-Hash (robuster als nur Link)
-            title_hash = hashlib.md5(title.encode('utf-8')).hexdigest()
+            # Normalisierter Titel für Dubletten-Check
+            norm_title = normalize_title(title)
+            title_hash = hashlib.md5(norm_title.encode('utf-8')).hexdigest()
+
             if title_hash in seen_hashes or link in seen_hashes:
                 continue
 
-            # Zeitfilter: 14 Tage
+            # Zeitfilter 14 Tage
             published = getattr(entry, 'published_parsed', None)
             if published:
                 try:
@@ -166,16 +180,16 @@ def get_news():
                     'score': score,
                     'title_hash': title_hash
                 })
-                logging.info(f"✅ Kandidat gefunden ({score} Pkt.): {title[:70]}...")
+                logging.info(f"✅ Kandidat ({score} Pkt.): {title[:70]}...")
 
-    # === WICHTIG: Erst sortieren, dann nur Top 8 behalten ===
+    # Nur die besten 8 behalten
     candidates.sort(key=lambda x: x['score'], reverse=True)
     final_items = candidates[:8]
 
-    # Jetzt erst KI-Aufruf und "gesehen"-Markierung für die finalen Artikel
+    # KI nur für die finalen 8 Artikel
     results = []
     for item in final_items:
-        summary = call_ai_model(item['title'], "")  # snippet leer, da oft nicht brauchbar
+        summary = call_ai_model(item['title'], "")
         results.append({
             'title': item['title'],
             'link': item['link'],
@@ -186,7 +200,6 @@ def get_news():
         seen_hashes.add(item['title_hash'])
         seen_hashes.add(item['link'])
 
-    # Datenbank aktualisieren (Limit auf 2000 erhöht)
     db_file.write_text(json.dumps({"hashes": list(seen_hashes)[-2000:]}))
 
     return results
@@ -230,7 +243,7 @@ def send_email(items):
                     </a>
                     <p style="margin:0; line-height:1.65; font-size:15.5px; color:#333;">{item['ai_summary']}</p>
                     <div style="margin-top:18px; padding-top:12px; border-top:1px solid #ddd; font-size:13px; color:#0071e3; font-weight:600;">
-                        Relevanz: <strong>{item['score']} Punkte</strong>
+                        Relevanz: <strong>{item['score']} / 100 Punkte</strong>
                     </div>
                     <div style="margin-top:20px;">
                         <a href="{item['link']}" target="_blank" style="color:#0071e3; font-weight:500; font-size:14px; text-decoration:none;">Mehr lesen →</a>
