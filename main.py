@@ -33,14 +33,10 @@ client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 
 def normalize_title(title: str) -> str:
-    """Normalisiert Titel für besseren Dubletten-Check"""
     text = title.lower()
-    text = re.sub(r'[^\w\s]', '', text)          # Satzzeichen entfernen
-    text = re.sub(r'\s+', ' ', text).strip()     # Mehrfache Leerzeichen entfernen
-    # Häufige überflüssige Wörter entfernen
-    for word in ["the", "a", "an", "of", "in", "on", "for", "with", "als", "patient", "patients"]:
-        text = text.replace(f" {word} ", " ")
-    return text.strip()
+    text = re.sub(r'[^\w\s]', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
 
 def calculate_score(title: str, link: str) -> int:
@@ -50,7 +46,7 @@ def calculate_score(title: str, link: str) -> int:
 
     # Basis-Bonus
     if "als" in text or "motor neuron" in text:
-        score += 20
+        score += 25
 
     # Hohe Priorität
     if any(k in text for k in ["approval", "approved", "zulassung", "fda approval", "ema"]):
@@ -60,37 +56,45 @@ def calculate_score(title: str, link: str) -> int:
     if any(k in text for k in ["phase 2", "phase ii", "phase 2b", "phase 2c", "topline"]):
         score += 35
 
+    # === STARKER BONUS FÜR KONKRETE THERAPIE-UPDATES ===
+    if any(k in text for k in ["radicava", "edaravone", "shionogi"]):
+        score += 35
+    if any(k in text for k in ["aan", "conference", "presentation", "presenting", "data readout", "analyses"]):
+        score += 25
+
     # Technologie & Breakthroughs
     if any(k in text for k in ["neuralink", "brain-computer", "bci", "brain chip", "thought control", "synchron", "brain interface"]):
-        score += 40
+        score += 45
     if any(k in text for k in ["breakthrough", "milestone", "game changer", "revolutionary", "life-changing"]):
-        score += 25
+        score += 30
 
     # Weitere Bereiche
     if any(k in text for k in ["alsfrs", "nfl", "neurofilament", "biomarker", "survival", "endpoint"]):
         score += 25
     if any(k in text for k in ["gene therapy", "aso", "antisense", "stem cell", "cell therapy"]):
-        score += 20
+        score += 22
 
     # Pipeline & Studien
     if "pipeline" in text or ("clinical trial" in text and "als" in text):
-        score += 18
+        score += 20
 
     # Quellen-Bonus
     premium = ["fda.gov", "nature.com", "nejm.org", "thelancet.com", "reuters.com", "statnews.com",
-               "neurologylive.com", "cgtlive.com", "alzforum.org", "beingpatient.com"]
+               "neurologylive.com", "cgtlive.com", "alzforum.org", "beingpatient.com", "pharmiweb.com"]
     if any(s in domain for s in premium):
         score += 25
 
-    # Abzüge
+    # === STÄRKERE ABZÜGE FÜR NICHT-RELEVANTE ARTIKEL ===
     if any(k in text for k in ["mouse", "murine", "preclinical", "animal model"]):
         score -= 40
     if any(k in text for k in ["ice bucket", "charity", "fundraiser", "spendenlauf", "donation run"]):
         score -= 50
-    if any(s in domain for s in ["marketwatch", "yahoo.com/finance", "seekingalpha", "fool.com"]):
-        score -= 30
+    if any(s in domain for s in ["marketwatch", "yahoo.com/finance", "seekingalpha", "fool.com", "barchart.com"]):
+        score -= 40
+    if any(k in text for k in ["what is", "died from", "actor", "celebrity", "game of thrones"]):
+        score -= 35   # starke Abwertung für Erklärungs- und Celebrity-Artikel
 
-    return max(0, min(100, score))   # Max 100 Punkte
+    return max(0, min(100, score))
 
 
 def call_ai_model(title, snippet):
@@ -126,16 +130,16 @@ def get_news():
         except:
             pass
 
-    queries = [  # Deine gute Liste
+    queries = [
         'ALS (FDA OR EMA OR "regulatory approval" OR "marketing authorization" OR "Breakthrough Designation" OR "Priority Review" OR "Fast Track")',
-        'ALS (NurOwn OR Pridopidine OR Tofersen OR Qalsody OR AMX0035 OR Relyvrio OR CNM-Au8 OR MN-166 OR ibudilast OR RT1999 OR smilagenin OR VHB937 OR QRL-201 OR ulefnersen)',
+        'ALS (NurOwn OR Pridopidine OR Tofersen OR Qalsody OR AMX0035 OR Relyvrio OR CNM-Au8 OR MN-166 OR ibudilast OR RT1999 OR smilagenin OR VHB937 OR QRL-201 OR ulefnersen OR Radicava OR Edaravone)',
         'ALS ("Phoenix Trial" OR "HEALEY ALS Platform" OR "PREVAiLS" OR "EXPERTS-ALS" OR "ASTRALS")',
         'ALS ("novel therapeutic" OR "first-in-class" OR "investigational drug" OR "new treatment" OR "emerging therapy")',
         'ALS ("Phase 1" OR "Phase I" OR "Phase 2" OR "Phase II" OR "topline results" OR "interim data" OR "data readout")',
         'ALS (TDP-43 OR Stathmin-2 OR UNC13A OR FUS OR SOD1 OR C9orf72 OR "gene therapy" OR ASO OR "antisense" OR CRISPR)',
         'ALS (biomarker OR NfL OR "Neurofilament" OR "ALSFRS-R" OR pNfH)',
         'ALS ("Brain-Computer Interface" OR BCI OR Synchron OR Neuralink OR "eye-tracking" OR "brain chip")',
-        'ALS ("motor neuron disease" OR "clinical trial" OR "study results" OR "breakthrough")'
+        'ALS ("motor neuron disease" OR "clinical trial" OR "study results" OR "breakthrough" OR "AAN")'
     ]
 
     candidates = []
@@ -155,14 +159,12 @@ def get_news():
             if not link or not title:
                 continue
 
-            # Normalisierter Titel für Dubletten-Check
             norm_title = normalize_title(title)
             title_hash = hashlib.md5(norm_title.encode('utf-8')).hexdigest()
 
             if title_hash in seen_hashes or link in seen_hashes:
                 continue
 
-            # Zeitfilter 14 Tage
             published = getattr(entry, 'published_parsed', None)
             if published:
                 try:
@@ -173,7 +175,7 @@ def get_news():
                     pass
 
             score = calculate_score(title, link)
-            if score >= 12:
+            if score >= 22:                     # Mindest-Score jetzt 22
                 candidates.append({
                     'title': title,
                     'link': link,
@@ -182,11 +184,9 @@ def get_news():
                 })
                 logging.info(f"✅ Kandidat ({score} Pkt.): {title[:70]}...")
 
-    # Nur die besten 8 behalten
     candidates.sort(key=lambda x: x['score'], reverse=True)
     final_items = candidates[:8]
 
-    # KI nur für die finalen 8 Artikel
     results = []
     for item in final_items:
         summary = call_ai_model(item['title'], "")
@@ -196,7 +196,6 @@ def get_news():
             'ai_summary': summary,
             'score': item['score']
         })
-        # Nur wirklich versendete Artikel als gesehen markieren
         seen_hashes.add(item['title_hash'])
         seen_hashes.add(item['link'])
 
