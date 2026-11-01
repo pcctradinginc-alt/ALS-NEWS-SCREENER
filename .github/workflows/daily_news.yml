@@ -1,13 +1,16 @@
 name: Daily ALS News
 
 on:
+  push:
+    paths:
+      - '.github/workflows/daily_news.yml' # Test workflow changes immediately
   schedule:
     - cron: '0 7 * * *' # Täglich um 08:00 Uhr deutscher Zeit (UTC+1)
   workflow_dispatch: # Erlaubt es dir, den Screener jederzeit manuell über den "Run workflow" Button zu starten
 
 jobs:
   run-screener:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     
     # Berechtigungen, um die sent_articles.json wieder im Repo speichern zu können
     permissions:
